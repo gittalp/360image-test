@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>360° Vision Simulator — IVAD Lab</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #000;
+      overflow: hidden;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      color: #fff;
+    }
+
+    canvas { display: block; }
+
+    /* ── Status pill ──────────────────────────────────────────────── */
+    #status {
+      position: fixed;
+      top: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      padding: 6px 18px;
+      border-radius: 24px;
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      white-space: nowrap;
+      pointer-events: none;
+      z-index: 100;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    /* ── Bottom control panel ─────────────────────────────────────── */
+    #panel {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      padding: 40px 20px 20px;
+      background: linear-gradient(to top, rgba(0,0,0,0.90), transparent);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px 16px;
+      z-index: 100;
+    }
+
+    .lbl {
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.45);
+      white-space: nowrap;
+    }
+
+    #sim-select {
+      background: rgba(255, 255, 255, 0.10);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      border-radius: 7px;
+      padding: 8px 12px;
+      font-size: 13px;
+      outline: none;
+      cursor: pointer;
+      flex: 1;
+      min-width: 200px;
+    }
+    #sim-select option { background: #111; }
+
+    .sev-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1;
+      min-width: 160px;
+    }
+
+    #severity {
+      flex: 1;
+      accent-color: #e35a2b;
+      cursor: pointer;
+    }
+
+    #sev-val {
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.4);
+      min-width: 28px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .btn {
+      background: rgba(255, 255, 255, 0.10);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      border-radius: 7px;
+      padding: 8px 14px;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+    .btn:hover  { background: rgba(255, 255, 255, 0.20); }
+    .btn.active { background: rgba(227, 90, 43, 0.40); border-color: rgba(227, 90, 43, 0.70); }
+
+    /* ── Three.js VRButton override ───────────────────────────────── */
+    /* The VRButton is appended to body with inline styles; we keep it
+       out of the panel flow and let Three.js position it.             */
+  </style>
+</head>
+<body>
+
+<div id="status">Loading panorama…</div>
+
+<div id="panel">
+  <span class="lbl">Simulation</span>
+
+  <select id="sim-select">
+    <option value="0">Normal Vision</option>
+    <option value="1">Reduced Acuity (Low Vision)</option>
+    <option value="2">Deuteranopia (Red–Green CVD)</option>
+    <option value="3">Protanopia (Red–Green CVD)</option>
+    <option value="4">Glaucoma — Peripheral Field Loss</option>
+    <option value="5">Cataract</option>
+    <option value="6">AMD — Central Scotoma</option>
+  </select>
+
+  <div class="sev-group">
+    <span class="lbl">Severity</span>
+    <input type="range" id="severity" min="0" max="1" step="0.01" value="0.7">
+    <span id="sev-val">0.70</span>
+  </div>
+
+  <!-- Shown only on mobile after feature detection -->
+  <button class="btn" id="orient-btn" style="display:none">Enable Gyro</button>
+</div>
+
+
+<!-- ─────────────────────────────────────────────────────────────────────────
+     THREE.JS  (import map — no build step required, works on GitHub Pages)
+     ───────────────────────────────────────────────────────────────────── -->
+<script type="importmap">
+{
+  "imports": {
+    "three":          "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/":  "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE          from 'three';
+import { OrbitControls }   from 'three/addons/controls/OrbitControls.js';
+import { VRButton }        from 'three/addons/webxr/VRButton.js';
+
+// ──────────────────────────────────────────────────────────────────────────
+// RENDERER
+// ──────────────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.xr.enabled = true;          // required for Quest WebXR path
+document.body.appendChild(renderer.domElement);
+
+// VRButton: only injected when the browser actually supports immersive-vr.
+// On desktop or iPhone it simply won't appear.
+if (navigator.xr) {
+  navigator.xr.isSessionSupported('immersive-vr').then(supported => {
+    if (supported) document.body.appendChild(VRButton.createButton(renderer));
+  });
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// SCENE & CAMERA
+// ──────────────────────────────────────────────────────────────────────────
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+// Camera stays at world origin throughout — the 500-unit sphere wraps it.
+
+// ──────────────────────────────────────────────────────────────────────────
+// ORBIT CONTROLS  (desktop mouse-drag + touch fallback)
+//
+// target is set to (-0.01, 0, 0) rather than the exact origin to:
+//   (a) prevent OrbitControls gimbal-lock at origin
+//   (b) start the camera facing the panorama's U=0.5 centerline (= –X world)
+//
+// With rotateSpeed = –0.3, dragging right rotates the view right (natural
+// "grab the environment" feel when you're inside the sphere).
+// ──────────────────────────────────────────────────────────────────────────
+const controls       = new OrbitControls(camera, renderer.domElement);
+controls.enableZoom  = false;
+controls.enablePan   = false;
+controls.rotateSpeed = -0.3;
+controls.target.set(-0.01, 0, 0);   // camera looks toward –X = UV center of panorama
+controls.update();
+
+// ──────────────────────────────────────────────────────────────────────────
+// SPHERE GEOMETRY
+//
+// Three.js SphereGeometry(r, wSeg, hSeg) creates outward-facing normals.
+// scale(–1, 1, 1) flips normals to face inward so the shader renders on the
+// inside of the sphere when viewed from the origin.
+//
+// After this transform, the UV → world-direction mapping is:
+//   theta = u * 2π   (longitude)
+//   phi   = v * π    (colatitude, 0 = zenith, π = nadir)
+//   world = ( cos(theta)*sin(phi),  cos(phi),  sin(theta)*sin(phi) )
+//
+// Verification:
+//   u=0.75, v=0.5  →  theta=3π/2,  phi=π/2  →  (0, 0, –1) = –Z (initial camera fwd, pre-control move)
+//   u=0.50, v=0.5  →  theta=π,     phi=π/2  →  (–1, 0, 0) = –X (panorama center)
+//   u=0.00, v=0.5  →  theta=0,     phi=π/2  →  ( 1, 0, 0) = +X
+//   u=0.25, v=0.5  →  theta=π/2,   phi=π/2  →  ( 0, 0,  1) = +Z
+// ──────────────────────────────────────────────────────────────────────────
+const geo = new THREE.SphereGeometry(500, 60, 40);
+geo.scale(-1, 1, 1);
+
+// ──────────────────────────────────────────────────────────────────────────
+// TEXTURE
+//
+// SQ4.jpg must be in the same directory as this HTML file.
+// MUST be served over HTTP/HTTPS — will fail from file:// due to CORS.
+// Insta360 X3 native resolution is 6080×3040; 2000×1000 is fine for web.
+// ──────────────────────────────────────────────────────────────────────────
+const texture = new THREE.TextureLoader().load(
+  'SQ4.jpg',
+  () => setStatus('Drag to look around'),
+  undefined,
+  () => setStatus('⚠ Cannot load SQ4.jpg — serve over HTTP, not file://')
+);
+texture.colorSpace = THREE.SRGBColorSpace;
+texture.minFilter  = THREE.LinearFilter;   // avoids mipmap seam artifacts at poles
+
+// ──────────────────────────────────────────────────────────────────────────
+// VERTEX SHADER
+// ──────────────────────────────────────────────────────────────────────────
+const vertShader = /* glsl */`
+  varying vec2 vUv;
+  void main() {
+    vUv         = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+// ──────────────────────────────────────────────────────────────────────────
+// FRAGMENT SHADER
+// ──────────────────────────────────────────────────────────────────────────
+const fragShader = /* glsl */`
+  precision highp float;
+
+  uniform sampler2D uTex;
+  uniform int       uMode;
+  //   0 = normal vision
+  //   1 = reduced acuity
+  //   2 = deuteranopia
+  //   3 = protanopia
+  //   4 = glaucoma (peripheral field loss)
+  //   5 = cataract
+  //   6 = AMD (central scotoma)
+  uniform float     uSeverity;   // 0.0 – 1.0
+  uniform vec3      uCamFwd;     // normalised camera-forward in world space,
+                                 // updated every frame so gaze-centred effects
+                                 // track where the user is looking
+
+  varying vec2 vUv;
+
+  // ── UV → unit world-direction ───────────────────────────────────────────
+  // Derived from Three.js SphereGeometry vertex formula after scale(–1, 1, 1):
+  //   x = cos(u·2π) · sin(v·π)
+  //   y = cos(v·π)
+  //   z = sin(u·2π) · sin(v·π)
+  vec3 uvToWorld(vec2 uv) {
+    float theta = uv.x * 6.28318530718;   // longitude  0 → 2π
+    float phi   = uv.y * 3.14159265359;   // colatitude 0 → π
+    float sp    = sin(phi);
+    return vec3(cos(theta) * sp,  cos(phi),  sin(theta) * sp);
+  }
+
+  // ── Angular eccentricity from camera forward (radians) ─────────────────
+  float eccentricity(vec2 uv) {
+    return acos(clamp(dot(uvToWorld(uv), uCamFwd), -1.0, 1.0));
+  }
+
+  // ── 9×9 Gaussian blur in UV-space ──────────────────────────────────────
+  // Kernel: σ = 2 index-steps, step = radius/4 UV-units.
+  //
+  // Weight at index (ix, iy): exp(–(ix²+iy²) / 8)    [σ=2 in index space]
+  // At edge (|ix|=4): exp(–16/8) = exp(–2) ≈ 0.135   (non-trivial, no clipping)
+  //
+  // UV-space blur is NOT equivalent to uniform angular blur near the poles —
+  // this is an acknowledged limitation acceptable for pedagogical empathy use.
+  // For validated CSF-based filtering use the offline DeVAS pipeline.
+  vec4 gaussBlur(vec2 uv, float radius) {
+    vec4  acc   = vec4(0.0);
+    float total = 0.0;
+    float step  = radius / 4.0;   // UV-space step per kernel index
+
+    for (int ix = -4; ix <= 4; ix++) {
+      for (int iy = -4; iy <= 4; iy++) {
+        float fx = float(ix);
+        float fy = float(iy);
+        float w  = exp(-(fx*fx + fy*fy) / 8.0);
+        vec2  s  = vec2(
+          fract(uv.x + fx * step),                    // horizontal WRAP (360° seam)
+          clamp(uv.y + fy * step, 0.001, 0.999)       // vertical CLAMP  (poles)
+        );
+        acc   += texture2D(uTex, s) * w;
+        total += w;
+      }
+    }
+    return acc / total;
+  }
+
+  // ── CVD matrices — Machado et al. 2009, severity = 1.0, sRGB space ─────
+  //
+  // GLSL mat3 is COLUMN-MAJOR: mat3(col0, col1, col2).
+  // The row-major confusion matrix M (R' = M[row0]·rgb, etc.) must be
+  // transposed when encoded in GLSL so that (m * rgb) computes M · rgb:
+  //
+  //   (m * rgb)[i] = Σ_j  m[j][i] · rgb[j]
+  //
+  // Therefore:  col 0 of GLSL mat = row 0 of M transposed = column 0 of M
+  //   i.e., GLSL mat3(col0, col1, col2) where col_j = (M[0][j], M[1][j], M[2][j])
+  //
+  // ── Deuteranopia (green-cone deficiency): ────────────────────────────
+  //   R' =  0.29275·R + 0.70725·G + 0.00000·B
+  //   G' =  0.29275·R + 0.70725·G + 0.00000·B
+  //   B' = −0.02234·R + 0.02234·G + 1.00000·B
+  vec3 deuteranopia(vec3 rgb) {
+    mat3 m = mat3(
+       0.29275,  0.29275, -0.02234,   // col 0 — coefficients of R
+       0.70725,  0.70725,  0.02234,   // col 1 — coefficients of G
+       0.00000,  0.00000,  1.00000    // col 2 — coefficients of B
+    );
+    return clamp(m * rgb, 0.0, 1.0);
+  }
+
+  // ── Protanopia (red-cone deficiency): ────────────────────────────────
+  //   R' = 0.10889·R + 0.89111·G + 0.00000·B
+  //   G' = 0.10889·R + 0.89111·G + 0.00000·B
+  //   B' = 0.00447·R − 0.00447·G + 1.00000·B
+  vec3 protanopia(vec3 rgb) {
+    mat3 m = mat3(
+       0.10889,  0.10889,  0.00447,
+       0.89111,  0.89111, -0.00447,
+       0.00000,  0.00000,  1.00000
+    );
+    return clamp(m * rgb, 0.0, 1.0);
+  }
+
+  // ── Glaucoma — concentric field loss centred on gaze direction ──────────
+  // Typical normal field ≈ 90° radius (π/2 rad) from fixation.
+  // Severe end-stage glaucoma can leave only a 5° central island (0.0873 rad).
+  // severity 0 → fieldRadius = π/2 (no loss)
+  // severity 1 → fieldRadius = 0.0873 rad (5° island only)
+  vec3 applyGlaucoma(vec3 col, float ecc) {
+    float fieldR = mix(1.5708, 0.0873, uSeverity);   // π/2 to 5° in radians
+    float edge   = 0.20;                              // smooth rolloff width (rad)
+    float mask   = 1.0 - smoothstep(fieldR, fieldR + edge, ecc);
+    return col * mask;
+  }
+
+  // ── Cataract — blur + contrast compression + warm yellowish veil ────────
+  // Three physical effects of lens clouding are combined:
+  //   1. Forward scatter  → image blur  (handled by caller via gaussBlur)
+  //   2. Reduced contrast → mid-grey compression
+  //   3. Yellowed lens    → warm tint toward (0.88, 0.82, 0.58)
+  vec3 applyCataract(vec4 blurred) {
+    vec3 col = blurred.rgb;
+    col = mix(col, vec3(0.5),              uSeverity * 0.22);   // contrast
+    col = mix(col, vec3(0.88, 0.82, 0.58), uSeverity * 0.36);   // warm tint
+    return clamp(col, 0.0, 1.0);
+  }
+
+  // ── AMD — central scotoma centred on gaze direction ─────────────────────
+  // Drusen / RPE damage causes a growing area of central visual loss.
+  // severity 0 → no scotoma
+  // severity 1 → scotoma radius ≈ 0.175 rad (≈ 10°)
+  // The lost area is rendered as neutral grey rather than black; patients
+  // often report a blurred / distorted / missing region, not pure darkness.
+  vec3 applyAMD(vec3 col, float ecc) {
+    float scotR = uSeverity * 0.175;              // max ~10° scotoma radius
+    float edge  = 0.05;
+    float mask  = smoothstep(scotR, scotR + edge, ecc);  // 0 inside, 1 outside
+    vec3  fill  = vec3(0.55, 0.53, 0.50);         // neutral grey filler
+    return mix(fill, col, mask);
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  void main() {
+    vec2  uv   = vUv;
+    vec4  base = texture2D(uTex, uv);
+    float ecc  = eccentricity(uv);    // angular distance from gaze (rad)
+                                      // computed once, reused by all gaze-centred modes
+
+    if (uMode == 0) {
+      // ── Normal vision ──────────────────────────────────────────────────
+      gl_FragColor = base;
+
+    } else if (uMode == 1) {
+      // ── Reduced acuity ─────────────────────────────────────────────────
+      // blur radius scales with severity; skip at near-zero to avoid
+      // 81-tap loop overhead when radius is imperceptibly small.
+      float r      = uSeverity * 0.045;
+      gl_FragColor = (r < 0.0005) ? base : gaussBlur(uv, r);
+
+    } else if (uMode == 2) {
+      // ── Deuteranopia ───────────────────────────────────────────────────
+      // Mix toward full deuteranopia so the slider demonstrates the range.
+      gl_FragColor = vec4(mix(base.rgb, deuteranopia(base.rgb), uSeverity), 1.0);
+
+    } else if (uMode == 3) {
+      // ── Protanopia ─────────────────────────────────────────────────────
+      gl_FragColor = vec4(mix(base.rgb, protanopia(base.rgb), uSeverity), 1.0);
+
+    } else if (uMode == 4) {
+      // ── Glaucoma ───────────────────────────────────────────────────────
+      gl_FragColor = vec4(applyGlaucoma(base.rgb, ecc), 1.0);
+
+    } else if (uMode == 5) {
+      // ── Cataract ───────────────────────────────────────────────────────
+      float r      = uSeverity * 0.032;
+      vec4  blrd   = (r < 0.0005) ? base : gaussBlur(uv, r);
+      gl_FragColor = vec4(applyCataract(blrd), 1.0);
+
+    } else if (uMode == 6) {
+      // ── AMD ────────────────────────────────────────────────────────────
+      gl_FragColor = vec4(applyAMD(base.rgb, ecc), 1.0);
+    }
+  }
+`;
+
+// ──────────────────────────────────────────────────────────────────────────
+// SHADER MATERIAL  &  MESH
+// ──────────────────────────────────────────────────────────────────────────
+const uniforms = {
+  uTex:      { value: texture },
+  uMode:     { value: 0 },
+  uSeverity: { value: 0.7 },
+  uCamFwd:   { value: new THREE.Vector3(-1, 0, 0) }  // matches initial camera direction
+};
+
+const mat    = new THREE.ShaderMaterial({ uniforms, vertexShader: vertShader, fragmentShader: fragShader });
+const sphere = new THREE.Mesh(geo, mat);
+scene.add(sphere);
+
+// ──────────────────────────────────────────────────────────────────────────
+// UI HELPERS
+// ──────────────────────────────────────────────────────────────────────────
+function setStatus(msg) {
+  document.getElementById('status').textContent = msg;
+}
+
+document.getElementById('sim-select').addEventListener('change', e => {
+  uniforms.uMode.value = parseInt(e.target.value, 10);
+});
+
+document.getElementById('severity').addEventListener('input', e => {
+  const v = parseFloat(e.target.value);
+  uniforms.uSeverity.value = v;
+  document.getElementById('sev-val').textContent = v.toFixed(2);
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// DEVICE ORIENTATION  (phone magic-window path)
+//
+// IMPORTANT: This uses DeviceOrientation API, NOT WebXR.
+// DeviceOrientation works in Safari iOS and Chrome Android.
+// WebXR (VRButton) is a completely separate path used only for Quest.
+//
+// Algorithm: standard Three.js DeviceOrientationControls quaternion transform
+//   1. Build YXZ Euler from (beta, alpha, –gamma)
+//   2. Multiply by Q1 = quaternion(–π/2 around X) — corrects for phone
+//      being held upright (screen-normal pointing away rather than up)
+//   3. Multiply by screen-orientation correction around Z
+// ──────────────────────────────────────────────────────────────────────────
+let orientActive = false;
+const orientData = { alpha: null, beta: null, gamma: null };
+
+const _euler = new THREE.Euler();
+const _q0    = new THREE.Quaternion();
+const _q1    = new THREE.Quaternion(     // –90° around X
+  -Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)
+);
+const _zee   = new THREE.Vector3(0, 0, 1);
+
+function applyDeviceOrientation() {
+  if (!orientActive || orientData.alpha === null) return;
+  const a = THREE.MathUtils.degToRad(orientData.alpha);
+  const b = THREE.MathUtils.degToRad(orientData.beta);
+  const g = THREE.MathUtils.degToRad(orientData.gamma);
+  const o = THREE.MathUtils.degToRad(window.screen?.orientation?.angle ?? 0);
+
+  _euler.set(b, a, -g, 'YXZ');
+  camera.quaternion.setFromEuler(_euler);
+  camera.quaternion.multiply(_q1);
+  camera.quaternion.multiply(_q0.setFromAxisAngle(_zee, -o));
+}
+
+async function requestOrientation() {
+  if (typeof DeviceOrientationEvent?.requestPermission === 'function') {
+    // iOS 13+: must be triggered by a user gesture
+    try {
+      const res = await DeviceOrientationEvent.requestPermission();
+      if (res === 'granted') startOrientation();
+      else alert('Orientation permission denied.');
+    } catch (err) { console.error(err); }
+  } else {
+    // Android + desktop Chrome: no permission API needed
+    startOrientation();
+  }
+}
+
+function startOrientation() {
+  orientActive     = true;
+  controls.enabled = false;   // disable mouse/touch drag while gyro is active
+  const btn        = document.getElementById('orient-btn');
+  btn.textContent  = '✓ Gyro Active';
+  btn.classList.add('active');
+  setStatus('Tilt phone to look around');
+  window.addEventListener('deviceorientation', e => {
+    orientData.alpha = e.alpha;
+    orientData.beta  = e.beta;
+    orientData.gamma = e.gamma;
+  }, true);
+}
+
+// Show gyro button only on mobile
+if (/Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)) {
+  const btn = document.getElementById('orient-btn');
+  btn.style.display = 'inline-block';
+  btn.addEventListener('click', requestOrientation);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// RESIZE
+// ──────────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// ANIMATION LOOP
+//
+// renderer.setAnimationLoop handles both normal rAF and WebXR frame timing.
+//
+// Camera update priority:
+//   1. In WebXR (Quest): renderer.xr manages the camera pose automatically —
+//      we skip manual camera updates entirely.
+//   2. Phone gyro active: apply DeviceOrientation quaternion.
+//   3. Default: OrbitControls (mouse / touch drag).
+//
+// uCamFwd is updated every frame so glaucoma / AMD angular masks track
+// the current gaze direction correctly.
+//
+// KNOWN LIMITATION (Phase 2): In WebXR/Quest mode uCamFwd reads the base
+// camera, not the head-tracked pose, so gaze-centred masks will not
+// track head rotation inside the headset. Full XR camera-pose forwarding
+// is deferred to a later phase.
+// ──────────────────────────────────────────────────────────────────────────
+const _fwd = new THREE.Vector3();
+
+renderer.setAnimationLoop(() => {
+  if (!renderer.xr.isPresenting) {
+    orientActive ? applyDeviceOrientation() : controls.update();
+  }
+
+  // Forward the camera's current look direction to the fragment shader
+  camera.getWorldDirection(_fwd);
+  uniforms.uCamFwd.value.copy(_fwd);
+
+  renderer.render(scene, camera);
+});
+
+</script>
+</body>
+</html>
